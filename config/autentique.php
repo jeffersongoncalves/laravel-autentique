@@ -63,7 +63,12 @@ return [
     |
     | The webhook route is registered only when a secret is set. Every request
     | must carry a valid HMAC-SHA256 `X-Autentique-Signature` header; valid
-    | payloads dispatch JeffersonGoncalves\Autentique\Events\WebhookReceived.
+    | payloads are stored in `autentique_webhook_calls` (once per event id)
+    | and processed by the ProcessWebhookCall job, which updates the local
+    | documents/signatures and then dispatches WebhookReceived.
+    |
+    | Stored calls older than `prune_after_days` are removed by
+    | `php artisan model:prune`.
     |
     */
 
@@ -71,6 +76,22 @@ return [
         'secret' => env('AUTENTIQUE_WEBHOOK_SECRET'),
         'path' => env('AUTENTIQUE_WEBHOOK_PATH', 'autentique/webhook'),
         'middleware' => [],
+        'prune_after_days' => (int) env('AUTENTIQUE_WEBHOOK_PRUNE_AFTER_DAYS', 30),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Queue
+    |--------------------------------------------------------------------------
+    |
+    | Connection and queue used by CreateDocument, SyncDocument and
+    | ProcessWebhookCall (null = application defaults).
+    |
+    */
+
+    'queue' => [
+        'connection' => env('AUTENTIQUE_QUEUE_CONNECTION'),
+        'name' => env('AUTENTIQUE_QUEUE'),
     ],
 
 ];

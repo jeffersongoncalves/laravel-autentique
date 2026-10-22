@@ -18,9 +18,12 @@ class AutentiqueServiceProvider extends PackageServiceProvider
         $package
             ->name('laravel-autentique')
             ->hasConfigFile()
+            ->hasMigrations(['create_autentique_tables'])
             ->hasInstallCommand(function (InstallCommand $command): void {
                 $command
                     ->publishConfigFile()
+                    ->publishMigrations()
+                    ->askToRunMigrations()
                     ->askToStarRepoOnGitHub('jeffersongoncalves/laravel-autentique');
             });
     }

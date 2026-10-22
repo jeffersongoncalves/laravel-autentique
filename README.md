@@ -19,7 +19,10 @@ Autentique allows **60 requests per minute** per account and answers `429 Too Ma
 
 - throttles requests client-side through your cache store, so every worker sharing the store stays under the limit;
 - waits for a free slot (up to `max_wait` seconds) instead of failing, or throws a `RateLimitException` you can use to `release()` a queued job;
-- retries any `429` (and `502/503/504`/connection errors) that still reaches the API, honouring `Retry-After`.
+- retries any `429`/`503` that still reaches the API, honouring `Retry-After` (never timeouts/`502`, which could create a document twice);
+- queued jobs release themselves on a rate limit instead of failing.
+
+Documents and signatures can be stored in your database and kept up to date by queued jobs and webhooks.
 
 ## Installation
 
@@ -27,10 +30,14 @@ Autentique allows **60 requests per minute** per account and answers `429 Too Ma
 composer require jeffersongoncalves/laravel-autentique
 ```
 
-Publish the config (optional):
+Publish the config and migrations, then migrate (creates `autentique_documents`, `autentique_signatures` and `autentique_webhook_calls`):
 
 ```bash
-php artisan laravel-autentique:install
+php artisan autentique:install
+# or
+php artisan vendor:publish --tag="autentique-config"
+php artisan vendor:publish --tag="autentique-migrations"
+php artisan migrate
 ```
 
 Add your API token (generate it at [painel.autentique.com.br/perfil/api](https://painel.autentique.com.br/perfil/api)):
@@ -110,9 +117,55 @@ try {
 }
 ```
 
-### Rate limit in queued jobs
+## Database and jobs
 
-The client already waits for a free slot. For jobs, keep `max_wait` small and release the job instead of blocking the worker:
+### Models
+
+| Model | Table | Holds |
+|---|---|---|
+| `Models\Document` | `autentique_documents` | `autentique_id`, `name`, `status` (`pending`/`signed`/`rejected`), `sandbox`, `original_url`, `signed_url`, signature counters, `finished_at`, raw `payload`, optional `documentable` (any model) — soft deletes |
+| `Models\Signature` | `autentique_signatures` | `public_id`, `name`, `email`, `phone`, `action`, `link`, `viewed_at`, `signed_at`, `rejected_at`, raw `payload` |
+| `Models\WebhookCall` | `autentique_webhook_calls` | every received webhook (`event_id` unique), `processed_at`, `exception` |
+
+```php
+use JeffersonGoncalves\Autentique\Models\Document;
+
+$documents = Document::query()->forModel($contract)->with('signatures')->get();
+
+$document->isSigned();
+$document->documentable; // the model you linked
+Document::query()->where('status', Document::STATUS_PENDING)->get();
+```
+
+`Document::sync(array $data, ?Model $documentable = null)` upserts any document array returned by the client (API or webhook shape) with its signatures, so you can store results of your own calls too.
+
+### Jobs
+
+```php
+use JeffersonGoncalves\Autentique\Jobs\CreateDocument;
+use JeffersonGoncalves\Autentique\Jobs\SyncDocument;
+
+// Upload (local path, or a path on any filesystem disk — S3 included), store and link to a model
+CreateDocument::dispatch(
+    document: ['name' => 'Service contract'],
+    signers: [['email' => 'client@example.com', 'action' => 'SIGN']],
+    path: 'contracts/42.pdf',
+    disk: 's3',
+    documentable: $contract,
+);
+
+// Refresh a document (and its signatures) from the API
+SyncDocument::dispatch($autentiqueId);
+```
+
+- On a rate limit both jobs `release()` themselves for the `Retry-After` time (`$tries = 10`).
+- `CreateDocument` is **not** retried after an error (`$maxExceptions = 1`): the document may already exist at Autentique and credits may be spent.
+- `SyncDocument` is unique per document for 60 s, so webhook bursts collapse into one request.
+- Set `AUTENTIQUE_QUEUE_CONNECTION` / `AUTENTIQUE_QUEUE` to run them on a dedicated queue.
+
+### Rate limit in your own jobs
+
+The client already waits for a free slot. In your own jobs, keep `max_wait` small and release the job instead of blocking the worker:
 
 ```php
 public function handle(): void
@@ -146,7 +199,13 @@ AUTENTIQUE_WEBHOOK_SECRET=your-webhook-secret
 AUTENTIQUE_WEBHOOK_PATH=autentique/webhook
 ```
 
-The `POST /autentique/webhook` route (name `autentique.webhook`) is registered only when a secret is set. It validates the HMAC-SHA256 `X-Autentique-Signature` header (`403` otherwise), answers `200` right away and dispatches `WebhookReceived`. The route has no `web` middleware, so CSRF does not apply.
+The `POST /autentique/webhook` route (name `autentique.webhook`) is registered only when a secret is set. It:
+
+1. validates the HMAC-SHA256 `X-Autentique-Signature` header (`403` otherwise);
+2. stores the call in `autentique_webhook_calls` — once per event id, so duplicate deliveries are ignored;
+3. answers `200` right away and queues `ProcessWebhookCall`, which upserts the document/signatures (`document.*`, `signature.*`), soft-deletes on `document.deleted`, marks `document.finished` as signed, queues a `SyncDocument` when a signature arrives before its document, and finally dispatches `WebhookReceived`.
+
+The route has no `web` middleware, so CSRF does not apply. Schedule `php artisan model:prune` to remove stored calls older than `AUTENTIQUE_WEBHOOK_PRUNE_AFTER_DAYS` (30).
 
 ```php
 use Illuminate\Support\Facades\Event;
@@ -161,7 +220,7 @@ Event::listen(function (WebhookReceived $event) {
 });
 ```
 
-Use a queued listener (`ShouldQueue`) for heavy work. `$event->previousAttributes()` holds the changed fields on `*.updated` events, `$event->payload` the full body.
+The listener runs after the local tables are updated, so `Document::query()->where('autentique_id', $event->object()['id'] ?? null)` already reflects the event. `$event->previousAttributes()` holds the changed fields on `*.updated` events, `$event->payload` the full body.
 
 ## Testing
 

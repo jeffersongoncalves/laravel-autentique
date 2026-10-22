@@ -24,13 +24,16 @@ class WebhookReceived
     }
 
     /**
-     * The resource of the event (`event.data.object`).
+     * The resource of the event: `event.data.object`, or `event.data` itself
+     * (Autentique sends both shapes; in the second `object` is the string "document"/"signature").
      *
      * @return array<string, mixed>
      */
     public function object(): array
     {
-        return (array) ($this->payload['event']['data']['object'] ?? []);
+        $data = (array) ($this->payload['event']['data'] ?? []);
+
+        return is_array($data['object'] ?? null) ? $data['object'] : $data;
     }
 
     /**
@@ -40,6 +43,6 @@ class WebhookReceived
      */
     public function previousAttributes(): array
     {
-        return (array) ($this->payload['event']['data']['previous_attributes'] ?? []);
+        return (array) ($this->payload['event']['data']['previous_attributes'] ?? $this->payload['event']['previous_attributes'] ?? []);
     }
 }

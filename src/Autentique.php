@@ -3,7 +3,6 @@
 namespace JeffersonGoncalves\Autentique;
 
 use Illuminate\Cache\RateLimiter;
-use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
@@ -257,8 +256,9 @@ class Autentique
             ->retry(
                 (int) ($this->config['rate_limit']['retry_times'] ?? 3) + 1,
                 fn (int $attempt, Throwable $e): int => $this->retryDelay($attempt, $e),
-                fn (Throwable $e): bool => $e instanceof ConnectionException
-                    || ($e instanceof RequestException && in_array($e->response->status(), [429, 502, 503, 504], true)),
+                // Only statuses where the request was surely not processed: retrying a timeout/502
+                // of createDocument could create (and bill) the document twice.
+                fn (Throwable $e): bool => $e instanceof RequestException && in_array($e->response->status(), [429, 503], true),
                 throw: false,
             );
     }

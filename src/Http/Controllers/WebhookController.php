@@ -4,7 +4,8 @@ namespace JeffersonGoncalves\Autentique\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
-use JeffersonGoncalves\Autentique\Events\WebhookReceived;
+use JeffersonGoncalves\Autentique\Jobs\ProcessWebhookCall;
+use JeffersonGoncalves\Autentique\Models\WebhookCall;
 
 class WebhookController
 {
@@ -18,13 +19,22 @@ class WebhookController
         }
 
         $payload = json_decode($request->getContent(), true);
+        $eventId = is_array($payload) ? ($payload['event']['id'] ?? null) : null;
 
-        if (! is_array($payload)) {
+        if (! is_string($eventId) || $eventId === '') {
             return response('Invalid payload.', 400);
         }
 
-        // Autentique expects a fast 2xx: do heavy work in a queued listener.
-        WebhookReceived::dispatch($payload);
+        // Autentique may deliver an event more than once: the event id makes it idempotent.
+        $call = WebhookCall::query()->firstOrCreate(['event_id' => $eventId], [
+            'type' => (string) ($payload['event']['type'] ?? ''),
+            'payload' => $payload,
+        ]);
+
+        // Autentique expects a fast 2xx: the work happens on the queue.
+        if ($call->wasRecentlyCreated) {
+            ProcessWebhookCall::dispatch($call);
+        }
 
         return response('', 200);
     }
